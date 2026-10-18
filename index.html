@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spatial Field Synthesizer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+/* Layout: full-bleed WebGL field; a quiet readout top-left and one control rail along the bottom. Single dark look by choice (it is a night sky). */
+:root {
+  --void: #06070d;
+  --panel: rgba(12, 14, 26, 0.78);
+  --line: rgba(160, 172, 230, 0.18);
+  --ink: #e6e8f5;
+  --dim: #8c92b4;
+  --gold: #f2cf86;
+  --blue: #7d8cff;
+  --display: "Unbounded", "Avenir Next", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { margin: 0; background: var(--void); color: var(--ink); font-family: var(--body); overflow: hidden; }
+#stage { position: fixed; inset: 0; touch-action: none; }
+#stage canvas { display: block; width: 100%; height: 100%; }
+
+.readout {
+  position: fixed; top: calc(env(safe-area-inset-top, 0px) + 16px); left: 16px; right: 16px;
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; pointer-events: none;
+}
+.brand h1 { font-family: var(--display); font-weight: 600; font-size: 15px; letter-spacing: 0.06em; text-transform: uppercase; margin: 0 0 6px; }
+.brand p { margin: 0; font-size: 12.5px; color: var(--dim); max-width: 34ch; line-height: 1.5; }
+.note { text-align: right; font-family: var(--mono); min-width: 0; }
+.note .name { font-family: var(--display); font-size: clamp(28px, 6vw, 44px); line-height: 1; color: var(--gold); font-variant-numeric: tabular-nums; }
+.note .meta { font-size: 11.5px; color: var(--dim); margin-top: 6px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.rail {
+  position: fixed; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px;
+  padding: 10px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.rail label, .rail .lbl { font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+.rail output { font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 3ch; font-variant-numeric: tabular-nums; letter-spacing: 0; text-transform: none; }
+.rail select, .rail button {
+  font: 500 12.5px var(--body); color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; cursor: pointer;
+}
+.rail select option { background: #10121f; }
+.rail button:hover, .rail select:hover { border-color: var(--dim); }
+.rail button:focus-visible, .rail select:focus-visible, .rail input:focus-visible, .wake button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+#sweepBtn { min-width: 92px; border-color: var(--gold); color: var(--gold); }
+#sweepBtn[aria-pressed="true"] { background: var(--gold); color: var(--void); }
+input[type=range] { width: 80px; accent-color: var(--gold); }
+.spacer { flex: 1; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.rail label[for=dir] { margin-left: -8px; }
+
+.wake {
+  position: fixed; inset: 0; display: grid; place-items: center; padding: 16px;
+  background: radial-gradient(ellipse at center, rgba(6,7,13,0.35), rgba(6,7,13,0.75));
+}
+.wake[hidden] { display: none; }
+.wake .card { max-width: 380px; text-align: center; display: grid; gap: 14px; justify-items: center; }
+.wake h2 { font-family: var(--display); font-weight: 400; font-size: 22px; margin: 0; text-wrap: balance; }
+.wake p { margin: 0; color: var(--dim); font-size: 13.5px; line-height: 1.55; }
+.wake button {
+  font: 600 13px var(--display); letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 12px 22px; border-radius: 999px; border: 0; background: var(--gold); color: var(--void); cursor: pointer;
+}
+.legend { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.legend b { color: var(--ink); font-weight: 500; }
+.mode { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.rail .mode button { border: 0; border-radius: 0; padding: 6px 12px; }
+.rail .mode button[aria-pressed="true"] { background: rgba(169, 228, 255, 0.16); color: #cfeeff; }
+
+.inspector {
+  pointer-events: auto; margin-top: 12px; width: 236px; display: grid; gap: 10px;
+  padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.inspector[hidden] { display: none; }
+.ins-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ins-head strong { font-family: var(--display); font-weight: 400; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; }
+.ins-head span { font-family: var(--mono); font-size: 12px; color: #cfeeff; font-variant-numeric: tabular-nums; }
+.inspector label { display: grid; grid-template-columns: 40px 1fr 34px; align-items: center; gap: 8px; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+.inspector input[type=range] { width: 100%; }
+.inspector output { font-family: var(--mono); font-size: 12px; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+.ins-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ins-listen button { flex: 1; }
+#playSliceBtn { border-color: #a9e4ff; color: #cfeeff; }
+#insSweepBtn { border-color: var(--gold); color: var(--gold); }
+#insSweepBtn[aria-pressed="true"] { background: var(--gold); color: var(--void); }
+.inspector button {
+  font: 500 12px var(--body); color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; cursor: pointer;
+}
+.inspector button:hover:not(:disabled) { border-color: var(--dim); }
+.inspector button:disabled { opacity: 0.4; cursor: default; }
+.inspector button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+#delBtn:not(:disabled) { color: #ffb4a2; }
+.ins-hint { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--dim); }
+.ins-hint kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink); }
+.library {
+  position: fixed; top: calc(env(safe-area-inset-top, 0px) + 96px); right: 16px; width: 320px; max-height: calc(100% - 200px);
+  display: grid; grid-template-rows: auto auto 1fr auto; gap: 12px; padding: 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.library[hidden] { display: none; }
+.lib-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.lib-head h2 { font-family: var(--display); font-weight: 400; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; margin: 0; }
+.library button, .library input {
+  font: 500 12.5px var(--body); color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+}
+.library button { cursor: pointer; }
+.library button:hover:not(:disabled) { border-color: var(--dim); }
+.library button:disabled { opacity: 0.4; cursor: default; }
+.library button:focus-visible, .library input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.library .primary { background: var(--gold); border-color: var(--gold); color: var(--void); }
+.save-form { display: grid; gap: 8px; }
+.save-row { display: flex; gap: 6px; }
+.save-row input { flex: 1; min-width: 0; }
+.save-form label { font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+.lib-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; display: grid; gap: 2px; align-content: start; min-height: 0; }
+.lib-list li { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; padding: 8px; border-radius: 6px; border: 1px solid transparent; }
+.lib-list li.current { border-color: rgba(242, 207, 134, 0.35); }
+.lib-list .nm { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-list .sub { grid-column: 1; font-family: var(--mono); font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.lib-list .acts { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 4px; }
+.lib-list .acts button { padding: 4px 8px; font-size: 12px; }
+.lib-list .del.armed { color: #ffb4a2; border-color: #ffb4a2; }
+.lib-empty, .lib-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dim); }
+.lib-note.ok { color: #cfeeff; }
+.lib-note.bad { color: #ffb4a2; }
+.sound-pill {
+  position: fixed; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 16px);
+  max-width: calc(100% - 32px); padding: 10px 16px; border-radius: 999px; border: 0; cursor: pointer;
+  background: var(--gold); color: var(--void); font: 600 12.5px var(--body); text-align: center;
+}
+.sound-pill[hidden] { display: none; }
+.err { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; color: var(--dim); text-align: center; }
+
+@media (max-width: 560px) {
+  .brand p { display: none; }
+  .rail input[type=range] { width: 72px; }
+  .inspector { width: 210px; padding: 10px; }
+  .ins-hint { display: none; }
+  .note .meta { white-space: normal; max-width: 15ch; margin-left: auto; }
+  .library { left: 16px; right: 16px; width: auto; top: calc(env(safe-area-inset-top, 0px) + 72px); max-height: calc(100% - 260px); }
+  .spacer { display: none; }
+}
+</style>
+
+<div id="stage" aria-label="3D star field. Each star is a note."></div>
+
+<div class="readout">
+  <div class="brand">
+    <h1>Spatial Field</h1>
+    <p id="help">Drag to orbit, scroll or pinch to zoom. Tap a star to sound it, or hold and sweep across several to strum.</p>
+    <div class="inspector" id="inspector" hidden>
+      <div class="ins-head"><strong id="insTitle">New star</strong><span id="insNote"></span></div>
+      <div class="ins-actions ins-listen">
+        <button id="playSliceBtn" type="button">Play slice</button>
+        <button id="insSweepBtn" type="button" aria-pressed="false">Play sweep</button>
+      </div>
+      <label for="sizeIn">Size <input id="sizeIn" type="range" min="12" max="100" value="45"><output id="sizeOut">0.45</output></label>
+      <label for="stepIn">Step <input id="stepIn" type="range" min="1" max="16" value="1"><output id="stepOut">1</output></label>
+      <div class="ins-actions">
+        <button id="delBtn" type="button" disabled>Delete</button>
+        <button id="undoBtn" type="button" disabled>Undo</button>
+        <button id="faceBtn" type="button">Face slice</button>
+        <button id="clearBtn" type="button">Clear field</button>
+      </div>
+      <p class="ins-hint"><kbd>←</kbd><kbd>→</kbd> step · <kbd>↑</kbd><kbd>↓</kbd> pitch · <kbd>[</kbd><kbd>]</kbd> size · <kbd>Del</kbd> remove · <kbd>Space</kbd> play slice</p>
+    </div>
+  </div>
+  <div class="note" aria-live="polite">
+    <div class="name" id="noteName">—</div>
+    <div class="meta" id="noteMeta">height = pitch · size = loudness</div>
+  </div>
+</div>
+
+<div class="rail">
+  <span class="mode" role="group" aria-label="Mode">
+    <button id="playMode" type="button" aria-pressed="true">Play</button>
+    <button id="editMode" type="button" aria-pressed="false">Edit</button>
+  </span>
+  <button id="sweepBtn" type="button" aria-pressed="false">Sweep</button>
+  <label for="dir"><span class="sr">Sweep direction</span>
+    <select id="dir">
+      <option value="forward">Forward</option>
+      <option value="backward">Backward</option>
+      <option value="up">Up</option>
+      <option value="down">Down</option>
+    </select>
+  </label>
+  <label for="bpm">Tempo <input id="bpm" type="range" min="50" max="170" value="92"><output id="bpmOut">92</output></label>
+  <label for="scale">Scale
+    <select id="scale"></select>
+  </label>
+  <label for="root">Root
+    <select id="root"></select>
+  </label>
+  <span class="spacer"></span>
+  <button id="newField" type="button">New field</button>
+  <button id="libBtn" type="button" aria-expanded="false" aria-controls="library">Saved fields</button>
+  <label for="vol">Level <input id="vol" type="range" min="0" max="100" value="70"></label>
+</div>
+
+<section class="library" id="library" aria-label="Saved fields" hidden>
+  <div class="lib-head"><h2>Saved fields</h2><button id="libClose" type="button" aria-label="Close saved fields">Close</button></div>
+  <form class="save-form" id="saveForm">
+    <label for="saveName">Save this field as</label>
+    <div class="save-row">
+      <input id="saveName" type="text" maxlength="60" autocomplete="off" placeholder="Name this field">
+      <button class="primary" id="saveBtn" type="submit">Save</button>
+    </div>
+    <button id="updateBtn" type="button" hidden>Update “<span id="updateName"></span>”</button>
+  </form>
+  <ul class="lib-list" id="libList"></ul>
+  <p class="lib-note" id="libNote" aria-live="polite"></p>
+</section>
+
+<button class="sound-pill" id="soundPill" type="button" hidden>Sound is off. Tap here to turn it on. On iPhone, also check the silent switch.</button>
+
+<div class="wake" id="wake">
+  <div class="card">
+    <h2>Each star is a note</h2>
+    <p>Higher stars sound higher. Bigger stars ring louder, brighter and longer. The sweep plane travels through the field and plays every star it crosses. Pick its direction on the bottom bar.</p>
+    <div class="legend"><span><b>↕ height</b> pitch</span><span><b>● size</b> loudness, timbre</span><span><b>⇢ sweep</b> time</span></div>
+    <button id="wakeBtn" type="button">Start sound</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function () {
+  if (!window.THREE || !THREE.OrbitControls) {
+    document.body.insertAdjacentHTML('beforeend', '<div class="err">The 3D library did not load. Check your connection and reload the page.</div>');
+    return;
+  }
+
+  // ---------- Musical model ----------
+  // Scale menu, grouped. Names already used by saved fields (Dorian, Lydian, Hirajoshi, ...) must stay unchanged.
+  const SCALE_GROUPS = [
+    ['Pentatonic & symmetric', {
+      'Major pentatonic': [0, 2, 4, 7, 9],
+      'Minor pentatonic': [0, 3, 5, 7, 10],
+      'Blues': [0, 3, 5, 6, 7, 10],
+      'Whole tone': [0, 2, 4, 6, 8, 10],
+      'Chromatic': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    }],
+    ['Major modes', {
+      'Ionian (major)': [0, 2, 4, 5, 7, 9, 11],
+      'Dorian': [0, 2, 3, 5, 7, 9, 10],
+      'Phrygian': [0, 1, 3, 5, 7, 8, 10],
+      'Lydian': [0, 2, 4, 6, 7, 9, 11],
+      'Mixolydian': [0, 2, 4, 5, 7, 9, 10],
+      'Aeolian (natural minor)': [0, 2, 3, 5, 7, 8, 10],
+      'Locrian': [0, 1, 3, 5, 6, 8, 10],
+    }],
+    ['Harmonic minor modes', {
+      'Harmonic minor': [0, 2, 3, 5, 7, 8, 11],
+      'Locrian ♮6': [0, 1, 3, 5, 6, 9, 10],
+      'Ionian ♯5': [0, 2, 4, 5, 8, 9, 11],
+      'Dorian ♯4': [0, 2, 3, 6, 7, 9, 10],
+      'Phrygian dominant': [0, 1, 4, 5, 7, 8, 10],
+      'Lydian ♯2': [0, 3, 4, 6, 7, 9, 11],
+      'Ultralocrian': [0, 1, 3, 4, 6, 8, 9],
+    }],
+    ['Melodic minor modes', {
+      'Melodic minor': [0, 2, 3, 5, 7, 9, 11],
+      'Dorian ♭2': [0, 1, 3, 5, 7, 9, 10],
+      'Lydian augmented': [0, 2, 4, 6, 8, 9, 11],
+      'Lydian dominant': [0, 2, 4, 6, 7, 9, 10],
+      'Mixolydian ♭6': [0, 2, 4, 5, 7, 8, 10],
+      'Locrian ♮2': [0, 2, 3, 5, 6, 8, 10],
+      'Altered': [0, 1, 3, 4, 6, 8, 10],
+    }],
+    ['Japanese', {
+      'Hirajoshi': [0, 2, 3, 7, 8],
+      'In': [0, 1, 5, 7, 8],
+      'Insen': [0, 1, 5, 7, 10],
+      'Iwato': [0, 1, 5, 6, 10],
+      'Kumoi': [0, 2, 3, 7, 9],
+      'Yo': [0, 2, 5, 7, 9],
+    }],
+    ['Indian, Middle Eastern & more', {
+      'Raga Bhairav (double harmonic)': [0, 1, 4, 5, 7, 8, 11],
+      'Raga Todi': [0, 1, 3, 6, 7, 8, 11],
+      'Raga Marwa': [0, 1, 4, 6, 7, 9, 11],
+      'Hijaz': [0, 1, 4, 5, 7, 8, 10],
+      'Persian': [0, 1, 4, 5, 6, 8, 11],
+      'Hungarian minor': [0, 2, 3, 6, 7, 8, 11],
+      'Egyptian': [0, 2, 5, 7, 10],
+      'Pelog (Balinese)': [0, 1, 3, 7, 8],
+      'Chinese': [0, 4, 6, 7, 11],
+    }],
+  ];
+  const SCALES = Object.assign({}, ...SCALE_GROUPS.map(g => g[1]));
+  const NOTE_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B'];
+  const OCTAVES = 3, BASE_OCT = 3;       // three octaves starting at octave 3
+  const STEPS = 16;                       // sweep steps through depth (sixteenth notes)
+  const H = 6, W = 6, D = 8;              // field half-extents: height (pitch), width, depth (time)
+
+  const state = { scale: 'Major pentatonic', root: 2, bpm: 92, level: 0.7, dir: 'forward' };
+
+  const scaleSel = document.getElementById('scale');
+  SCALE_GROUPS.forEach(([label, scales]) => {
+    const og = document.createElement('optgroup'); og.label = label;
+    Object.keys(scales).forEach(k => og.appendChild(new Option(k, k)));
+    scaleSel.appendChild(og);
+  });
+  scaleSel.value = state.scale;
+  const rootSel = document.getElementById('root');
+  NOTE_NAMES.forEach((n, i) => rootSel.add(new Option(n, i)));
+  rootSel.value = state.root;
+
+  const degreeCount = () => SCALES[state.scale].length * OCTAVES + 1;
+  const degreeY = i => -H + (i / (degreeCount() - 1)) * 2 * H;
+  function degreeMidi(i) {
+    const sc = SCALES[state.scale];
+    return 12 * (BASE_OCT + 1) + state.root + 12 * Math.floor(i / sc.length) + sc[i % sc.length];
+  }
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+  const midiName = m => NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
+  const stepZ = s => -D + (s + 0.5) * (2 * D / STEPS);
+
+  // ---------- Scene ----------
+  const stage = document.getElementById('stage');
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x06070d, 1);
+  stage.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x06070d, 0.006);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 400);
+  camera.position.set(17, 5.5, 15);
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 0, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 8;
+  controls.maxDistance = 60;
+  controls.enablePan = false;
+
+  function makeTexture(draw, size) {
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    draw(c.getContext('2d'), size);
+    const t = new THREE.CanvasTexture(c);
+    return t;
+  }
+  const starTex = makeTexture((g, s) => {
+    const r = s / 2;
+    const grd = g.createRadialGradient(r, r, 0, r, r, r);
+    grd.addColorStop(0, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.12, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.24, 'rgba(255,255,255,0.55)');
+    grd.addColorStop(0.42, 'rgba(255,255,255,0.1)');
+    grd.addColorStop(0.7, 'rgba(255,255,255,0)');
+    g.fillStyle = grd; g.fillRect(0, 0, s, s);
+  }, 128);
+  // diffraction rays live on their own sprite so they can flare while a star plays and stay faint at rest
+  const raysTex = makeTexture((g, s) => {
+    [[s, 3], [3, s]].forEach(([w, h]) => {
+      const lg = w > h ? g.createLinearGradient(0, 0, s, 0) : g.createLinearGradient(0, 0, 0, s);
+      lg.addColorStop(0, 'rgba(255,255,255,0)'); lg.addColorStop(0.5, 'rgba(255,255,255,0.9)'); lg.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = lg; g.fillRect((s - w) / 2, (s - h) / 2, w, h);
+    });
+  }, 256);
+  const ringTex = makeTexture((g, s) => {
+    g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = s * 0.03;
+    g.beginPath(); g.arc(s / 2, s / 2, s * 0.44, 0, Math.PI * 2); g.stroke();
+  }, 128);
+
+  // distant dust for atmosphere
+  (function dust() {
+    const n = 1400, pos = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2, r = 90 + Math.random() * 60;
+      const q = Math.sqrt(1 - u * u);
+      pos[i * 3] = r * q * Math.cos(th); pos[i * 3 + 1] = r * u; pos[i * 3 + 2] = r * q * Math.sin(th);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const pts = new THREE.Points(geo, new THREE.PointsMaterial({ color: 0x6f7699, size: 0.5, sizeAttenuation: true, fog: false, transparent: true, opacity: 0.7 }));
+    scene.add(pts);
+  })();
+
+  // field frame + octave planes + labels
+  const guides = new THREE.Group();
+  scene.add(guides);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x8a95d6, transparent: true, opacity: 0.16 });
+  const rootLineMat = new THREE.LineBasicMaterial({ color: 0xf2cf86, transparent: true, opacity: 0.22 });
+  function rect(y, mat) {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-W, y, -D), new THREE.Vector3(W, y, -D), new THREE.Vector3(W, y, D), new THREE.Vector3(-W, y, D), new THREE.Vector3(-W, y, -D)]);
+    return new THREE.Line(g, mat);
+  }
+  function label(text, color) {
+    const c = document.createElement('canvas'); c.width = 128; c.height = 64;
+    const g = c.getContext('2d');
+    g.font = '500 30px "IBM Plex Mono", monospace'; g.fillStyle = color; g.textBaseline = 'middle';
+    g.fillText(text, 8, 32);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, fog: false }));
+    sp.scale.set(1.6, 0.8, 1);
+    return sp;
+  }
+  function buildGuides() {
+    while (guides.children.length) {
+      const o = guides.children.pop();
+      o.geometry && o.geometry.dispose();
+      if (o.material && o.material.map) o.material.map.dispose();
+    }
+    // vertical frame edges
+    [[-W, -D], [W, -D], [W, D], [-W, D]].forEach(([x, z]) => {
+      guides.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x, -H, z), new THREE.Vector3(x, H, z)]), lineMat));
+    });
+    const len = SCALES[state.scale].length;
+    for (let o = 0; o <= OCTAVES; o++) {
+      const i = o * len, y = degreeY(i);
+      guides.add(rect(y, o === 0 || o === OCTAVES ? lineMat : rootLineMat));
+      const lb = label(midiName(degreeMidi(i)), '#c9b27c');
+      lb.position.set(-W - 1.1, y, D);
+      guides.add(lb);
+    }
+    // time ticks along the floor
+    for (let s = 0; s <= STEPS; s += 4) {
+      const z = -D + s * (2 * D / STEPS);
+      guides.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-W, -H, z), new THREE.Vector3(W, -H, z)]), lineMat));
+    }
+  }
+
+  // sweep plane
+  const sweep = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ color: 0xf2cf86, transparent: true, opacity: 0.0, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+  );
+  const sweepEdge = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1)), new THREE.LineBasicMaterial({ color: 0xf2cf86, transparent: true, opacity: 0 }));
+  sweep.add(sweepEdge);
+  scene.add(sweep);
+  // Forward/backward sweep through depth (an upright plane); up/down sweep through height (a flat plane).
+  const vertical = () => state.dir === 'up' || state.dir === 'down';
+  function orientSweep() {
+    sweep.position.set(0, 0, 0);
+    if (vertical()) { sweep.rotation.set(-Math.PI / 2, 0, 0); sweep.scale.set(2 * W, 2 * D, 1); sweep.position.y = state.dir === 'up' ? -H : H; }
+    else { sweep.rotation.set(0, 0, 0); sweep.scale.set(2 * W, 2 * H, 1); sweep.position.z = state.dir === 'forward' ? -D : D; }
+  }
+  orientSweep();
+  // Which of the 16 sweep steps a star sounds on, for the current direction.
+  function sweepStep(st) {
+    if (state.dir === 'forward') return st.step;
+    if (state.dir === 'backward') return STEPS - 1 - st.step;
+    const band = Math.min(STEPS - 1, Math.floor(((st.sprite.position.y + H) / (2 * H)) * STEPS));
+    return state.dir === 'up' ? band : STEPS - 1 - band;
+  }
+  function sweepPos(stepF) {
+    const u = stepF / STEPS;
+    if (state.dir === 'forward') sweep.position.z = -D + u * 2 * D;
+    else if (state.dir === 'backward') sweep.position.z = D - u * 2 * D;
+    else if (state.dir === 'up') sweep.position.y = -H + u * 2 * H;
+    else sweep.position.y = H - u * 2 * H;
+  }
+
+  // ---------- Stars ----------
+  const LOW = new THREE.Color('#8f96ff'), MID = new THREE.Color('#c4eeff'), HIGH = new THREE.Color('#ffe09a');
+  function tint(t) {
+    return t < 0.5 ? LOW.clone().lerp(MID, t * 2) : MID.clone().lerp(HIGH, (t - 0.5) * 2);
+  }
+  let stars = [];
+  const starGroup = new THREE.Group();
+  scene.add(starGroup);
+
+  function placeStar(st) {
+    const n = degreeCount();
+    st.degree = Math.max(0, Math.min(n - 1, Math.round(((st.yRaw + H) / (2 * H)) * (n - 1))));
+    st.midi = degreeMidi(st.degree);
+    st.sprite.position.set(st.x, degreeY(st.degree), stepZ(st.step));
+    st.color = tint(st.degree / (n - 1));
+    st.sprite.material.color.copy(st.color);
+    st.rays.position.copy(st.sprite.position);
+    st.rays.material.color.copy(st.color);
+    st.base = 0.95 + st.size * 2.6;
+  }
+  function makeStar(d) {
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: starTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    const rays = new THREE.Sprite(new THREE.SpriteMaterial({ map: raysTex, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
+    const st = { step: d.step, x: d.x, yRaw: d.y, size: d.size, sprite, rays, flash: 0, hover: 0 };
+    placeStar(st);
+    starGroup.add(sprite, rays);
+    stars.push(st);
+    return st;
+  }
+  function removeStar(st) {
+    starGroup.remove(st.sprite, st.rays); st.sprite.material.dispose(); st.rays.material.dispose();
+    stars = stars.filter(s => s !== st);
+  }
+  const snapshot = () => stars.map(s => ({ step: s.step, x: s.x, y: s.yRaw, size: s.size }));
+  function setField(data) {
+    stars.slice().forEach(removeStar);
+    data.forEach(makeStar);
+  }
+  function generateField() {
+    const out = [];
+    for (let s = 0; s < STEPS; s++) {
+      const r = Math.random();
+      const count = s % 4 === 0 ? (r < 0.4 ? 2 : 3) : s % 2 === 0 ? (r < 0.2 ? 1 : r < 0.75 ? 2 : 3) : (r < 0.3 ? 0 : r < 0.8 ? 1 : 2);
+      for (let k = 0; k < count; k++) {
+        out.push({ step: s, x: (Math.random() * 2 - 1) * (W - 0.6), y: (Math.random() * 2 - 1) * H, size: 0.12 + 0.88 * Math.pow(Math.random(), 1.9) });
+      }
+    }
+    return out;
+  }
+  function retune() { stars.forEach(placeStar); buildGuides(); buildSlice(); }
+
+  // ---------- Edit slice: the depth step where new stars land ----------
+  const slice = new THREE.Group();
+  slice.visible = false;
+  scene.add(slice);
+  const sliceFill = new THREE.Mesh(new THREE.PlaneGeometry(2 * W, 2 * H),
+    new THREE.MeshBasicMaterial({ color: 0xa9e4ff, transparent: true, opacity: 0.045, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+  const sliceEdge = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(2 * W, 2 * H)),
+    new THREE.LineBasicMaterial({ color: 0xa9e4ff, transparent: true, opacity: 0.55, fog: false }));
+  const sliceLines = new THREE.Group();
+  slice.add(sliceFill, sliceEdge, sliceLines);
+  const degLineMat = new THREE.LineBasicMaterial({ color: 0xa9e4ff, transparent: true, opacity: 0.1, fog: false });
+  const degRootMat = new THREE.LineBasicMaterial({ color: 0xf2cf86, transparent: true, opacity: 0.4, fog: false });
+  function buildSlice() {
+    while (sliceLines.children.length) sliceLines.children.pop().geometry.dispose();
+    const len = SCALES[state.scale].length;
+    for (let i = 0; i < degreeCount(); i++) {
+      const y = degreeY(i);
+      sliceLines.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-W, y, 0), new THREE.Vector3(W, y, 0)]), i % len === 0 ? degRootMat : degLineMat));
+    }
+  }
+  const ghost = new THREE.Sprite(new THREE.SpriteMaterial({ map: starTex, transparent: true, opacity: 0.45, depthWrite: false, blending: THREE.AdditiveBlending }));
+  ghost.visible = false;
+  scene.add(ghost);
+  const selRing = new THREE.Sprite(new THREE.SpriteMaterial({ map: ringTex, color: 0xf2cf86, transparent: true, opacity: 0.9, depthWrite: false, fog: false }));
+  selRing.visible = false;
+  scene.add(selRing);
+
+  // ripple rings
+  const rings = [];
+  function ripple(st) {
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: ringTex, color: st.color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    sp.position.copy(st.sprite.position);
+    sp.userData = { age: 0, life: 0.5 + st.size * 1.2, from: st.base * 0.4, to: st.base * 2.2 };
+    scene.add(sp); rings.push(sp);
+  }
+
+  // ---------- Audio ----------
+  let ctx = null, master = null, dry = null, wet = null;
+  const waveCache = new Map();
+  function waveFor(size) {
+    const b = Math.round(size * 7);
+    if (waveCache.has(b)) return waveCache.get(b);
+    const N = 32, real = new Float32Array(N), imag = new Float32Array(N);
+    const rolloff = 2.6 - b * 0.22;        // small stars: nearly pure; big stars: bright, many partials
+    const maxH = 2 + b * 4;
+    for (let n = 1; n < N; n++) {
+      if (n > maxH) break;
+      imag[n] = 1 / Math.pow(n, rolloff) * (n % 2 === 0 ? 0.7 : 1);
+    }
+    const w = ctx.createPeriodicWave(real, imag);
+    waveCache.set(b, w);
+    return w;
+  }
+  function impulse(seconds, decay) {
+    const len = Math.floor(ctx.sampleRate * seconds), buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+    }
+    return buf;
+  }
+  // Phones are strict about sound: it must start inside a tap, and iPhones mute Web Audio when the
+  // ringer switch is on silent unless the page declares itself a playback app.
+  let silentEl = null;
+  function silentWav() {
+    const n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const w = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+    w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, 'data'); v.setUint32(40, n * 2, true);
+    let bin = ''; const u = new Uint8Array(buf);
+    for (let i = 0; i < u.length; i++) bin += String.fromCharCode(u[i]);
+    return 'data:audio/wav;base64,' + btoa(bin);
+  }
+  function unlockAudio() {
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    try {
+      if (!silentEl) {
+        silentEl = document.createElement('audio');
+        silentEl.src = silentWav(); silentEl.loop = true; silentEl.setAttribute('playsinline', '');
+        silentEl.volume = 0.01;
+      }
+      const pr = silentEl.play(); if (pr && pr.catch) pr.catch(() => {});
+    } catch (e) {}
+    if (!ctx) return;
+    if (ctx.state !== 'running') { const pr = ctx.resume(); if (pr && pr.catch) pr.catch(() => {}); }
+    try {   // a one-sample silent buffer started inside the tap wakes older iOS audio
+      const b = ctx.createBuffer(1, 1, ctx.sampleRate), src = ctx.createBufferSource();
+      src.buffer = b; src.connect(ctx.destination); src.start(0);
+    } catch (e) {}
+  }
+  function initAudio() {
+    soundWanted = true;
+    if (ctx) { if (ctx.state !== 'running') unlockAudio(); return; }
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.25;
+    master = ctx.createGain(); master.gain.value = state.level;
+    dry = ctx.createGain(); dry.gain.value = 1;
+    const verb = ctx.createConvolver(); verb.buffer = impulse(3.2, 3);
+    wet = ctx.createGain(); wet.gain.value = 0.28;
+    dry.connect(comp); dry.connect(verb); verb.connect(wet); wet.connect(comp);
+    comp.connect(master); master.connect(ctx.destination);
+    ctx.onstatechange = updateSoundPill;
+    unlockAudio();
+  }
+
+  function playStar(st, when) {
+    if (!ctx) return;
+    const t = Math.max(when || 0, ctx.currentTime);
+    const f = mtof(st.midi), s = st.size;
+    const decay = 0.45 + s * 3.4;
+    const peak = (0.05 + 0.3 * s * s) * Math.min(1.6, Math.pow(261.6 / f, 0.25));
+
+    const osc = ctx.createOscillator();
+    osc.setPeriodicWave(waveFor(s));
+    osc.frequency.value = f;
+    const sub = ctx.createOscillator();     // gentle detuned sine shimmer, stronger on big stars
+    sub.type = 'sine'; sub.frequency.value = f * 1.003;
+    const subG = ctx.createGain(); subG.gain.value = 0.15 + 0.35 * s;
+
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass'; filt.Q.value = 0.6 + s * 2;
+    const open = Math.min(16000, f * (3 + s * 14));
+    filt.frequency.setValueAtTime(open, t);
+    filt.frequency.exponentialRampToValueAtTime(Math.max(f * 1.2, 80), t + decay);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + 0.004 + s * 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+
+    osc.connect(filt); sub.connect(subG); subG.connect(filt); filt.connect(g); g.connect(dry);
+    osc.start(t); sub.start(t);
+    osc.stop(t + decay + 0.05); sub.stop(t + decay + 0.05);
+    osc.onended = () => { g.disconnect(); filt.disconnect(); subG.disconnect(); };
+  }
+
+  // visual events queued against the audio clock
+  const pending = [];
+  function sound(st, when) {
+    playStar(st, when);
+    pending.push({ st, t: when || (ctx ? ctx.currentTime : 0) });
+  }
+
+  // Any later tap or key retries a stalled audio context (iOS can suspend it when the app is backgrounded).
+  const soundPill = document.getElementById('soundPill');
+  let soundWanted = false;
+  function updateSoundPill() {
+    soundPill.hidden = !(soundWanted && ctx && ctx.state !== 'running');
+  }
+  ['touchend', 'click', 'keydown'].forEach(t => window.addEventListener(t, () => {
+    if (soundWanted && ctx && ctx.state !== 'running') unlockAudio();
+  }, true));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && soundWanted && ctx && ctx.state !== 'running') { const pr = ctx.resume(); if (pr && pr.catch) pr.catch(() => {}); } });
+  soundPill.addEventListener('click', () => { unlockAudio(); setTimeout(updateSoundPill, 300); });
+
+  // ---------- Sweep sequencer ----------
+  let sweeping = false, step = 0, nextT = 0;
+  const stepLog = [];                     // {step, t} for drawing the plane in sync with sound
+  const stepDur = () => 60 / state.bpm / 4;
+  function schedule() {
+    if (!sweeping || !ctx) return;
+    while (nextT < ctx.currentTime + 0.12) {
+      stepLog.push({ step, t: nextT, dur: stepDur() });
+      if (stepLog.length > 32) stepLog.shift();
+      for (const st of stars) if (sweepStep(st) === step) sound(st, nextT);
+      nextT += stepDur();
+      step = (step + 1) % STEPS;
+    }
+  }
+  setInterval(schedule, 25);
+  const sweepBtn = document.getElementById('sweepBtn');
+  function setSweep(on) {
+    sweeping = on;
+    sweepBtn.setAttribute('aria-pressed', on);
+    sweepBtn.textContent = on ? 'Stop sweep' : 'Sweep';
+    insSweepBtn.setAttribute('aria-pressed', on);
+    insSweepBtn.textContent = on ? 'Stop sweep' : 'Play sweep';
+    if (on && ctx) { step = 0; nextT = ctx.currentTime + 0.05; stepLog.length = 0; schedule(); }
+  }
+  const insSweepBtn = document.getElementById('insSweepBtn');
+  sweepBtn.addEventListener('click', () => { initAudio(); ctx.resume(); setSweep(!sweeping); });
+  insSweepBtn.addEventListener('click', () => { initAudio(); ctx.resume(); setSweep(!sweeping); });
+
+  // ---------- Readout ----------
+  const noteName = document.getElementById('noteName'), noteMeta = document.getElementById('noteMeta');
+  function show(st) {
+    noteName.textContent = midiName(st.midi);
+    noteMeta.textContent = mtof(st.midi).toFixed(1) + ' Hz · size ' + st.size.toFixed(2);
+  }
+
+  // ---------- Pointer ----------
+  const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  let pressing = false, lastHit = null, hovered = null;
+  function aim(e) {
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+  }
+  function hitAt(e) {
+    aim(e);
+    // sprites are mostly halo, so pick the star whose core is nearest the ray
+    let best = null, bestD = Infinity;
+    const v = new THREE.Vector3();
+    for (const st of stars) {
+      v.copy(st.sprite.position);
+      const d = ray.ray.distanceToPoint(v), reach = 0.25 + st.base * 0.22;
+      if (d < reach) {
+        // in edit mode, prefer stars on the active slice
+        const off = mode === 'edit' && st.step !== sliceStep ? 0.6 : 0;
+        const score = d / reach + v.distanceTo(camera.position) * 0.002 + off;
+        if (score < bestD) { bestD = score; best = st; }
+      }
+    }
+    return best;
+  }
+  const _plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), _pt = new THREE.Vector3();
+  function planePoint(e, z, strict) {
+    aim(e);
+    _plane.constant = -z;
+    if (!ray.ray.intersectPlane(_plane, _pt)) return null;
+    if (strict && (Math.abs(_pt.x) > W + 0.3 || Math.abs(_pt.y) > H + 0.3)) return null;
+    return { x: Math.max(-W, Math.min(W, _pt.x)), y: Math.max(-H, Math.min(H, _pt.y)) };
+  }
+  const snapDegree = y => Math.max(0, Math.min(degreeCount() - 1, Math.round(((y + H) / (2 * H)) * (degreeCount() - 1))));
+
+  // ---------- Edit mode ----------
+  let mode = 'play', sliceStep = 0, selected = null, brush = 0.45;
+  let drag = null, down = null;
+  const undoStack = [];
+  const inspector = document.getElementById('inspector'), help = document.getElementById('help');
+  const insTitle = document.getElementById('insTitle'), insNote = document.getElementById('insNote');
+  const sizeIn = document.getElementById('sizeIn'), sizeOut = document.getElementById('sizeOut');
+  const stepIn = document.getElementById('stepIn'), stepOut = document.getElementById('stepOut');
+  const delBtn = document.getElementById('delBtn'), undoBtn = document.getElementById('undoBtn');
+  const HELP = {
+    play: help.textContent,
+    edit: 'Tap the lit slice to place a star there. Drag a star to change its pitch and position. Drag empty space to orbit.',
+  };
+
+  function pushUndo() {
+    undoStack.push(snapshot());
+    if (undoStack.length > 60) undoStack.shift();
+    undoBtn.disabled = false;
+  }
+  function undo() {
+    if (!undoStack.length) return;
+    select(null);
+    setField(undoStack.pop());
+    undoBtn.disabled = !undoStack.length;
+  }
+  function syncInspector() {
+    const s = selected ? selected.size : brush;
+    sizeIn.value = Math.round(s * 100); sizeOut.textContent = s.toFixed(2);
+    stepIn.value = sliceStep + 1; stepOut.textContent = sliceStep + 1;
+    insTitle.textContent = selected ? 'Selected star' : 'New star';
+    insNote.textContent = selected ? midiName(selected.midi) : '';
+    delBtn.disabled = !selected;
+    slice.position.z = stepZ(sliceStep);
+  }
+  function select(st) {
+    selected = st;
+    if (st) sliceStep = st.step;
+    syncInspector();
+  }
+  function setMode(m) {
+    mode = m;
+    document.getElementById('playMode').setAttribute('aria-pressed', m === 'play');
+    document.getElementById('editMode').setAttribute('aria-pressed', m === 'edit');
+    inspector.hidden = m !== 'edit';
+    slice.visible = m === 'edit';
+    help.textContent = HELP[m];
+    if (m === 'play') { select(null); ghost.visible = false; }
+    syncInspector();
+  }
+  function placeAt(p) {
+    pushUndo();
+    const st = makeStar({ step: sliceStep, x: p.x, y: degreeY(snapDegree(p.y)), size: brush });
+    select(st);
+    initAudio(); ctx.resume();
+    sound(st); show(st);
+  }
+  function deleteSelected() {
+    if (!selected) return;
+    pushUndo();
+    removeStar(selected);
+    select(null);
+  }
+  function moveSelected(dStep, dDeg) {
+    if (!selected) return;
+    pushUndo();
+    if (dStep) selected.step = (selected.step + dStep + STEPS) % STEPS;
+    if (dDeg) selected.yRaw = degreeY(Math.max(0, Math.min(degreeCount() - 1, selected.degree + dDeg)));
+    placeStar(selected);
+    select(selected);
+    initAudio(); ctx.resume();
+    sound(selected); show(selected);
+  }
+  function resizeSelected(v, audition) {
+    brush = v;
+    if (selected) { selected.size = v; placeStar(selected); }
+    syncInspector();
+    if (audition && selected) { initAudio(); ctx.resume(); sound(selected); }
+  }
+
+  document.getElementById('playMode').addEventListener('click', () => setMode('play'));
+  document.getElementById('editMode').addEventListener('click', () => setMode('edit'));
+  let sizeUndoArmed = true;
+  sizeIn.addEventListener('input', () => {
+    if (selected && sizeUndoArmed) { pushUndo(); sizeUndoArmed = false; }
+    resizeSelected(sizeIn.value / 100, false);
+  });
+  sizeIn.addEventListener('change', () => { sizeUndoArmed = true; resizeSelected(sizeIn.value / 100, true); });
+  stepIn.addEventListener('input', () => {
+    const v = stepIn.value - 1;
+    if (selected && selected.step !== v) moveSelected(v - selected.step, 0);
+    else { sliceStep = v; syncInspector(); }
+  });
+  delBtn.addEventListener('click', deleteSelected);
+  undoBtn.addEventListener('click', undo);
+  document.getElementById('clearBtn').addEventListener('click', () => { pushUndo(); select(null); setField([]); currentId = null; renderLibrary(); });
+
+  // camera tween used by "Face slice"
+  let camTween = null;
+  document.getElementById('faceBtn').addEventListener('click', () => {
+    const len = camera.position.length();
+    camTween = { from: camera.position.clone(), to: new THREE.Vector3(0, len * 0.12, len), t: 0 };
+  });
+
+  // Play every star on the active slice together: what that step of the sequence sounds like.
+  function playSlice() {
+    initAudio(); ctx.resume();
+    const chord = stars.filter(s => s.step === sliceStep).sort((a, b) => a.midi - b.midi);
+    if (!chord.length) {
+      noteName.textContent = '—';
+      noteMeta.textContent = 'step ' + (sliceStep + 1) + ' is empty';
+      return;
+    }
+    const t = ctx.currentTime + 0.03;
+    chord.forEach(st => sound(st, t));
+    const names = chord.map(st => midiName(st.midi));
+    noteName.textContent = names.length > 3 ? names.slice(0, 3).join(' ') + ' …' : names.join(' ');
+    noteMeta.textContent = 'step ' + (sliceStep + 1) + ' · ' + chord.length + (chord.length === 1 ? ' star' : ' stars');
+  }
+  document.getElementById('playSliceBtn').addEventListener('click', playSlice);
+
+  window.addEventListener('keydown', e => {
+    if (/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if (e.key === ' ' && mode === 'edit' && e.target.tagName !== 'BUTTON') { e.preventDefault(); playSlice(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
+    if (mode !== 'edit') return;
+    const k = e.key;
+    if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); deleteSelected(); }
+    else if (k === 'Escape') select(null);
+    else if (k === 'ArrowLeft' || k === 'ArrowRight') {
+      e.preventDefault();
+      const d = k === 'ArrowLeft' ? -1 : 1;
+      if (selected) moveSelected(d, 0); else { sliceStep = (sliceStep + d + STEPS) % STEPS; syncInspector(); }
+    }
+    else if (k === 'ArrowUp' || k === 'ArrowDown') { e.preventDefault(); moveSelected(0, k === 'ArrowUp' ? 1 : -1); }
+    else if (k === '[' || k === ']') {
+      const v = Math.max(0.12, Math.min(1, (selected ? selected.size : brush) + (k === ']' ? 0.08 : -0.08)));
+      if (selected) pushUndo();
+      resizeSelected(v, true);
+    }
+  });
+
+  stage.addEventListener('pointerdown', e => {
+    const st = hitAt(e);
+    if (mode === 'play') {
+      if (st) {
+        controls.enabled = false;           // capture-phase listener runs before OrbitControls sees the press
+        pressing = true; lastHit = st;
+        initAudio(); ctx.resume();
+        sound(st); show(st);
+      }
+      return;
+    }
+    if (st) {
+      controls.enabled = false;
+      pushUndo();
+      drag = { st, moved: false };
+      select(st);
+      initAudio(); ctx.resume();
+      sound(st); show(st);
+    } else {
+      down = { x: e.clientX, y: e.clientY, p: planePoint(e, stepZ(sliceStep), true) };
+    }
+  }, true);
+
+  window.addEventListener('pointermove', e => {
+    if (drag) {
+      const st = drag.st, p = planePoint(e, st.sprite.position.z, false);
+      if (p) {
+        const prev = st.degree;
+        st.x = p.x; st.yRaw = degreeY(snapDegree(p.y));
+        placeStar(st);
+        drag.moved = true;
+        if (st.degree !== prev) { sound(st); show(st); syncInspector(); }
+      }
+      return;
+    }
+    const st = hitAt(e);
+    if (pressing) {
+      if (st && st !== lastHit) { sound(st); show(st); }
+      if (st) lastHit = st;
+    }
+    hovered = st;
+    renderer.domElement.style.cursor = st ? (mode === 'edit' ? 'move' : 'pointer') : (mode === 'edit' ? 'crosshair' : 'grab');
+    ghost.visible = false;
+    if (mode === 'edit' && !st && !down && e.target === renderer.domElement) {
+      const p = planePoint(e, stepZ(sliceStep), true);
+      if (p) {
+        const deg = snapDegree(p.y), k = 0.95 + brush * 2.6;
+        ghost.position.set(p.x, degreeY(deg), stepZ(sliceStep));
+        ghost.scale.set(k, k, 1);
+        ghost.material.color.copy(tint(deg / (degreeCount() - 1)));
+        ghost.visible = true;
+        const m = degreeMidi(deg);
+        noteMeta.textContent = 'place ' + midiName(m) + ' · step ' + (sliceStep + 1) + ' · size ' + brush.toFixed(2);
+      }
+    } else if (st && !pressing) {
+      noteMeta.textContent = midiName(st.midi) + ' · ' + mtof(st.midi).toFixed(1) + ' Hz · size ' + st.size.toFixed(2);
+    }
+  });
+
+  function endPress(e) {
+    if (drag) {
+      if (!drag.moved) { undoStack.pop(); undoBtn.disabled = !undoStack.length; }
+      drag = null;
+    }
+    if (down && e) {
+      const dist = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+      if (dist < 6) { if (down.p) placeAt(down.p); else select(null); }
+      down = null;
+    }
+    pressing = false; lastHit = null; controls.enabled = true;
+  }
+  window.addEventListener('pointerup', endPress);
+  window.addEventListener('pointercancel', () => { down = null; endPress(null); });
+
+  // ---------- Saved fields ----------
+  // Saved in the viewer's private store when the page is opened signed in to Claude;
+  // otherwise kept in this browser only.
+  const LOCAL_KEY = 'spatial-field-saves-v1';
+  const library = document.getElementById('library'), libBtn = document.getElementById('libBtn');
+  const libList = document.getElementById('libList'), libNote = document.getElementById('libNote');
+  const saveForm = document.getElementById('saveForm'), saveName = document.getElementById('saveName');
+  const updateBtn = document.getElementById('updateBtn'), updateName = document.getElementById('updateName');
+  let saves = [], currentId = null, store = null, storeKind = 'local', armedDelete = null;
+
+  const r3 = v => Math.round(v * 1000) / 1000;
+  function fieldRecord(name) {
+    return {
+      name, savedAt: Date.now(), scale: state.scale, root: state.root, bpm: state.bpm, dir: state.dir,
+      stars: stars.map(s => ({ step: s.step, x: r3(s.x), y: r3(s.yRaw), size: r3(s.size) })),
+    };
+  }
+  const newId = () => 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+  const localStore = {
+    read() { try { return JSON.parse(localStorage.getItem(LOCAL_KEY)) || []; } catch (e) { return []; } },
+    write(list) { try { localStorage.setItem(LOCAL_KEY, JSON.stringify(list)); return true; } catch (e) { return false; } },
+    async put(id, rec) {
+      const list = this.read().filter(f => f.id !== id);
+      list.push(Object.assign({ id }, rec));
+      if (!this.write(list)) throw new Error('local');
+      loadLocal();
+    },
+    async remove(id) { this.write(this.read().filter(f => f.id !== id)); loadLocal(); },
+  };
+  function loadLocal() { saves = localStore.read().sort((a, b) => b.savedAt - a.savedAt); renderLibrary(); }
+
+  async function connectStore() {
+    if (!window.claude || !window.claude.use) return;
+    try {
+      const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
+      const uid = user ? await user.id() : null;
+      if (!db || !uid) return;
+      const col = db.doc('data/users/' + uid + '/library').collection('fields');
+      store = {
+        put: (id, rec) => col.doc(id).set(rec),
+        remove: id => col.doc(id).delete(),
+      };
+      storeKind = 'account';
+      col.orderBy('savedAt', 'desc').onSnapshot(snap => {
+        saves = snap.docs.map(d => Object.assign({ id: d.id }, d.data()));
+        renderLibrary();
+      }, () => { store = null; storeKind = 'local'; loadLocal(); note('Saving to your account stopped working, so saves now stay in this browser.', 'bad'); });
+      renderLibrary();
+    } catch (e) { /* stay on browser storage */ }
+  }
+  const activeStore = () => store || localStore;
+
+  function note(text, kind) { libNote.textContent = text; libNote.className = 'lib-note' + (kind ? ' ' + kind : ''); }
+  function whenText(ms) {
+    const d = new Date(ms);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+  function renderLibrary() {
+    libList.textContent = '';
+    if (!saves.length) {
+      const li = document.createElement('li');
+      li.innerHTML = '<p class="lib-empty">No saved fields yet. Name the current field above and press Save.</p>';
+      libList.appendChild(li);
+    }
+    for (const f of saves) {
+      const li = document.createElement('li');
+      if (f.id === currentId) li.className = 'current';
+      const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = f.name || 'Untitled field';
+      const sub = document.createElement('span'); sub.className = 'sub';
+      sub.textContent = (f.stars ? f.stars.length : 0) + ' stars · ' + NOTE_NAMES[f.root] + ' ' + f.scale.toLowerCase() + ' · ' + whenText(f.savedAt);
+      const acts = document.createElement('span'); acts.className = 'acts';
+      const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Open';
+      open.addEventListener('click', () => openSaved(f));
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'del';
+      const armed = armedDelete === f.id;
+      del.textContent = armed ? 'Confirm' : 'Delete';
+      if (armed) del.classList.add('armed');
+      del.setAttribute('aria-label', (armed ? 'Confirm delete of ' : 'Delete ') + (f.name || 'field'));
+      del.addEventListener('click', () => deleteSaved(f));
+      acts.append(open, del);
+      li.append(nm, acts, sub);
+      libList.appendChild(li);
+    }
+    const cur = saves.find(f => f.id === currentId);
+    updateBtn.hidden = !cur;
+    if (cur) updateName.textContent = cur.name;
+    if (!libNote.textContent || libNote.dataset.where !== storeKind) {
+      libNote.dataset.where = storeKind;
+      note(storeKind === 'account' ? 'Saved to your Claude account. They come back whenever you open this page.' : 'Saved in this browser only. Open the page signed in to Claude to keep them in your account.');
+    }
+  }
+
+  async function saveAs(id, name) {
+    const rec = fieldRecord(name);
+    try {
+      await activeStore().put(id, rec);
+      currentId = id;
+      renderLibrary();
+      note('Saved “' + name + '”.', 'ok');
+    } catch (e) {
+      note('That save did not go through. Check your connection and try again.', 'bad');
+    }
+  }
+  saveForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const name = saveName.value.trim() || ('Field ' + (saves.length + 1));
+    saveAs(newId(), name);
+    saveName.value = '';
+  });
+  updateBtn.addEventListener('click', () => {
+    const cur = saves.find(f => f.id === currentId);
+    if (cur) saveAs(cur.id, cur.name);
+  });
+  function openSaved(f) {
+    pushUndo();
+    select(null);
+    state.scale = SCALES[f.scale] ? f.scale : state.scale; scaleSel.value = state.scale;
+    state.root = +f.root || 0; rootSel.value = state.root;
+    state.bpm = +f.bpm || state.bpm; bpm.value = state.bpm; bpmOut.textContent = state.bpm;
+    if (f.dir) setDir(f.dir);
+    setField((f.stars || []).map(s => ({ step: Math.max(0, Math.min(STEPS - 1, s.step | 0)), x: +s.x, y: +s.y, size: Math.max(0.12, Math.min(1, +s.size)) })));
+    retune(); syncInspector();
+    currentId = f.id; armedDelete = null;
+    renderLibrary();
+    note('Opened “' + f.name + '”.', 'ok');
+  }
+  async function deleteSaved(f) {
+    if (armedDelete !== f.id) { armedDelete = f.id; renderLibrary(); return; }
+    armedDelete = null;
+    try {
+      await activeStore().remove(f.id);
+      if (currentId === f.id) currentId = null;
+      renderLibrary();
+      note('Deleted “' + f.name + '”.', 'ok');
+    } catch (e) { note('That delete did not go through. Try again.', 'bad'); renderLibrary(); }
+  }
+  function toggleLibrary(open) {
+    library.hidden = !open;
+    libBtn.setAttribute('aria-expanded', open);
+    armedDelete = null;
+    if (open) { renderLibrary(); }
+  }
+  libBtn.addEventListener('click', () => toggleLibrary(library.hidden));
+  document.getElementById('libClose').addEventListener('click', () => toggleLibrary(false));
+  library.addEventListener('pointerdown', e => e.stopPropagation());
+
+  // ---------- Controls ----------
+  const dirSel = document.getElementById('dir');
+  function setDir(d) {
+    if (!['forward', 'backward', 'up', 'down'].includes(d)) return;
+    state.dir = d; dirSel.value = d;
+    orientSweep();
+    // restart the pass from the new starting edge on the next step
+    step = 0; stepLog.length = 0;
+  }
+  dirSel.addEventListener('change', () => setDir(dirSel.value));
+  const bpm = document.getElementById('bpm'), bpmOut = document.getElementById('bpmOut');
+  bpm.addEventListener('input', () => { state.bpm = +bpm.value; bpmOut.textContent = bpm.value; });
+  scaleSel.addEventListener('change', () => { state.scale = scaleSel.value; retune(); syncInspector(); });
+  rootSel.addEventListener('change', () => { state.root = +rootSel.value; retune(); syncInspector(); });
+  document.getElementById('newField').addEventListener('click', () => { pushUndo(); select(null); setField(generateField()); currentId = null; renderLibrary(); });
+  const vol = document.getElementById('vol');
+  vol.addEventListener('input', () => { state.level = vol.value / 100; if (master) master.gain.setTargetAtTime(state.level, ctx.currentTime, 0.02); });
+  document.getElementById('wakeBtn').addEventListener('click', () => {
+    soundWanted = true;
+    initAudio(); unlockAudio();
+    setTimeout(updateSoundPill, 1200);
+    document.getElementById('wake').hidden = true;
+    setSweep(true);
+  });
+
+  // ---------- Render loop ----------
+  function resize() {
+    const w = stage.clientWidth, h = stage.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    const hHalf = Math.atan(Math.tan(THREE.MathUtils.degToRad(25)) * camera.aspect);
+    camera.position.setLength(Math.max(22, Math.min(44, 10 / Math.sin(Math.min(hHalf, THREE.MathUtils.degToRad(25))))));
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    const at = ctx ? ctx.currentTime : 0;
+
+    // fire queued flashes once their audio time arrives
+    for (let i = pending.length - 1; i >= 0; i--) {
+      if (pending[i].t <= at + 0.01) { const st = pending[i].st; st.flash = 1; ripple(st); if (sweeping) show(st); pending.splice(i, 1); }
+    }
+
+    // sweep plane follows the step the audio is on
+    let target = 0;
+    if (sweeping && stepLog.length) {
+      let cur = null;
+      for (const e of stepLog) if (e.t <= at) cur = e;
+      if (cur) {
+        const frac = Math.min(1, (at - cur.t) / cur.dur);
+        sweepPos(cur.step + frac);
+        target = 1;
+      }
+    }
+    const m = sweep.material;
+    m.opacity += ((target ? 0.05 : 0) - m.opacity) * Math.min(1, dt * 6);
+    sweepEdge.material.opacity = m.opacity * 7;
+
+    // stars grow a little when the camera is far back (narrow phone screens), so they stay easy to see
+    const viewBoost = Math.min(1.5, Math.max(1, camera.position.length() / 26));
+    for (const st of stars) {
+      st.flash *= Math.exp(-dt * (2.2 / (0.4 + st.size)));
+      st.hover += ((st === hovered ? 1 : 0) - st.hover) * Math.min(1, dt * 10);
+      const twinkle = reduceMotion ? 1 : 1 + 0.04 * Math.sin(now * 0.002 + st.x * 3 + st.step);
+      const k = st.base * viewBoost * twinkle * (1 + st.flash * 0.9 + st.hover * 0.25);
+      st.sprite.scale.set(k, k, 1);
+      // rays: a faint hint at rest, full flare while the note sounds
+      const play = Math.min(1, st.flash * 1.3);
+      const rk = st.base * viewBoost * (1.1 + play * 1.1);
+      st.rays.scale.set(rk, rk, 1);
+      st.rays.material.opacity = (mode === 'edit' && st.step !== sliceStep ? 0.3 : 1) * (0.07 + 0.85 * play + st.hover * 0.15);
+      const dim = mode === 'edit' && st.step !== sliceStep ? 0.3 : 1;
+      st.sprite.material.opacity = dim * (0.85 + 0.15 * Math.min(1, st.flash + st.hover * 0.5 + st.size * 0.4));
+    }
+    selRing.visible = !!selected && mode === 'edit';
+    if (selected) {
+      selRing.position.copy(selected.sprite.position);
+      const k = selected.base * 0.9 * (reduceMotion ? 1 : 1 + 0.05 * Math.sin(now * 0.005));
+      selRing.scale.set(k, k, 1);
+    }
+    if (camTween) {
+      camTween.t = Math.min(1, camTween.t + dt / 0.6);
+      const e = 1 - Math.pow(1 - camTween.t, 3);
+      camera.position.lerpVectors(camTween.from, camTween.to, e);
+      if (camTween.t >= 1) camTween = null;
+    }
+    for (let i = rings.length - 1; i >= 0; i--) {
+      const r = rings[i], u = r.userData;
+      u.age += dt;
+      const p = u.age / u.life;
+      if (p >= 1) { scene.remove(r); r.material.dispose(); rings.splice(i, 1); continue; }
+      const s = u.from + (u.to - u.from) * (1 - Math.pow(1 - p, 2));
+      r.scale.set(s, s, 1);
+      r.material.opacity = 0.7 * (1 - p);
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+
+  setField(generateField());
+  buildGuides();
+  buildSlice();
+  syncInspector();
+  loadLocal();
+  connectStore();
+  resize();
+  requestAnimationFrame(frame);
+  window.__field = { get stars() { return stars; }, get ctx() { return ctx; }, get sweeping() { return sweeping; }, get dir() { return state.dir; }, sweep, sweepStep, get selected() { return selected; }, camera, stepZ, degreeY };
+})();
+</script>
+
+</html>
