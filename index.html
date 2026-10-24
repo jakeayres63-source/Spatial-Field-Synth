@@ -209,6 +209,14 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     </select>
   </label>
   <label for="bpm">Tempo <input id="bpm" type="range" min="50" max="170" value="92"><output id="bpmOut">92</output></label>
+  <label for="grav">Gravity <input id="grav" type="range" min="0" max="100" value="0"><output id="gravOut">0</output></label>
+  <label for="bend">Bend
+    <select id="bend">
+      <option value="quarter">Quarter tone</option>
+      <option value="semitone">Semitone</option>
+      <option value="none">No limit</option>
+    </select>
+  </label>
   <label for="scale">Scale
     <select id="scale"></select>
   </label>
@@ -323,7 +331,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   const H = 6, W = 6;                     // field half-extents: height (pitch), width
   let D = DEPTH_FOR[STEPS];               // depth half-extent (time)
 
-  const state = { scale: 'Major pentatonic', root: 2, bpm: 92, level: 0.7, dir: 'forward' };
+  const state = { scale: 'Major pentatonic', root: 2, bpm: 92, level: 0.7, dir: 'forward', gravity: 0, bend: 'quarter' };
 
   const scaleSel = document.getElementById('scale');
   SCALE_GROUPS.forEach(([label, scales]) => {
@@ -475,11 +483,12 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     else { sweep.rotation.set(0, 0, 0); sweep.scale.set(2 * W, 2 * H, 1); sweep.position.z = state.dir === 'forward' ? -D : D; }
   }
   orientSweep();
-  // Which of the 16 sweep steps a star sounds on, for the current direction.
+  // Which sweep step a star sounds on, for the current direction. Up/down bands use the star's home
+  // height, so gravity bends pitch without changing when a star plays.
   function sweepStep(st) {
     if (state.dir === 'forward') return st.step;
     if (state.dir === 'backward') return STEPS - 1 - st.step;
-    const band = Math.min(STEPS - 1, Math.floor(((st.sprite.position.y + H) / (2 * H)) * STEPS));
+    const band = Math.min(STEPS - 1, Math.floor(((st.home.y + H) / (2 * H)) * STEPS));
     return state.dir === 'up' ? band : STEPS - 1 - band;
   }
   function sweepPos(stepF) {
@@ -503,17 +512,20 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     const n = degreeCount();
     st.degree = Math.max(0, Math.min(n - 1, Math.round(((st.yRaw + H) / (2 * H)) * (n - 1))));
     st.midi = degreeMidi(st.degree);
-    st.sprite.position.set(st.x, degreeY(st.degree), stepZ(st.step));
+    st.home.set(st.x, degreeY(st.degree), stepZ(st.step));
+    if (!st.placed) { st.sprite.position.copy(st.home); st.target.copy(st.home); st.placed = true; }
     st.color = tint(st.degree / (n - 1));
     st.sprite.material.color.copy(st.color);
     st.rays.position.copy(st.sprite.position);
     st.rays.material.color.copy(st.color);
     st.base = 0.95 + st.size * 2.6;
+    gravDirty = true;
   }
   function makeStar(d) {
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: starTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
     const rays = new THREE.Sprite(new THREE.SpriteMaterial({ map: raysTex, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
-    const st = { step: d.step, x: d.x, yRaw: d.y, size: d.size, sprite, rays, flash: 0, hover: 0 };
+    const st = { step: d.step, x: d.x, yRaw: d.y, size: d.size, sprite, rays, flash: 0, hover: 0,
+      home: new THREE.Vector3(), target: new THREE.Vector3(), bend: 0, placed: false };
     placeStar(st);
     starGroup.add(sprite, rays);
     stars.push(st);
@@ -522,6 +534,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   function removeStar(st) {
     starGroup.remove(st.sprite, st.rays); st.sprite.material.dispose(); st.rays.material.dispose();
     stars = stars.filter(s => s !== st);
+    gravDirty = true;
   }
   const snapshot = () => stars.map(s => ({ step: s.step, x: s.x, y: s.yRaw, size: s.size }));
   function setField(data) {
@@ -540,6 +553,61 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     return out;
   }
   function retune() { stars.forEach(placeStar); buildGuides(); buildSlice(); }
+
+  // ---------- Gravity ----------
+  // Each star is pulled a fraction of the way toward the others: further by big (heavy) and nearby stars,
+  // and hardly at all by stars smaller than itself. Big stars are also slow to move at all. The pull is worked out in one pass from the stars' home
+  // positions (where they were placed), so a field always settles the same way. Only height and width
+  // move, never the step. Height is pitch, so a pulled star bends between its scale notes, up to the Bend
+  // limit. Depth is measured in steps, so gravity acts the same at 16, 32 or 64 steps.
+  const BEND_LIMITS = { quarter: 50, semitone: 100, none: Infinity };
+  const REACH = 2.5, MAX_PULL = 0.6;
+  let gravDirty = true;
+  function midiAtY(y, ladder) {
+    const u = ((y + H) / (2 * H)) * (ladder.length - 1), lo = Math.max(0, Math.min(ladder.length - 2, Math.floor(u)));
+    return ladder[lo] + (u - lo) * (ladder[lo + 1] - ladder[lo]);
+  }
+  function yAtMidi(m, ladder) {
+    let lo = 0;
+    while (lo < ladder.length - 2 && ladder[lo + 1] < m) lo++;
+    return degreeY(lo + (m - ladder[lo]) / (ladder[lo + 1] - ladder[lo]));
+  }
+  function applyGravity() {
+    gravDirty = false;
+    const G = 1.2 * Math.pow(state.gravity, 1.5), limit = BEND_LIMITS[state.bend];
+    const ladder = [];
+    for (let i = 0; i < degreeCount(); i++) ladder.push(degreeMidi(i));
+    for (const a of stars) {
+      a.target.copy(a.home); a.bend = 0;
+      if (!G) continue;
+      const ma = a.size * a.size;
+      let pull = 0, dx = 0, dy = 0;
+      for (const b of stars) {
+        if (b === a) continue;
+        const mb = b.size * b.size;
+        const ex = b.home.x - a.home.x, ey = b.home.y - a.home.y, ez = b.step - a.step;
+        const w = G * mb / (ma + mb) * Math.pow(Math.min(1, mb / ma), 5) * Math.exp(-(ex * ex + ey * ey + ez * ez) / (REACH * REACH));
+        pull += w; dx += w * ex; dy += w * ey;
+      }
+      if (pull > MAX_PULL) { dx *= MAX_PULL / pull; dy *= MAX_PULL / pull; }
+      const inertia = 1 / (1 + 3 * ma);       // size 1 moves a quarter as far as a tiny star would
+      dx *= inertia; dy *= inertia;
+      let y = Math.max(-H, Math.min(H, a.home.y + dy));
+      let bend = (midiAtY(y, ladder) - a.midi) * 100;
+      if (Math.abs(bend) > limit) {
+        // keep height honest to pitch: stop the star where the bend reaches the limit
+        bend = Math.sign(bend) * limit;
+        const ny = yAtMidi(a.midi + bend / 100, ladder);
+        dx *= (ny - a.home.y) / (y - a.home.y);
+        y = ny;
+      }
+      a.target.set(Math.max(-W, Math.min(W, a.home.x + dx)), y, a.home.z);
+      a.bend = Math.abs(bend) < 0.5 ? 0 : bend;
+    }
+  }
+  const settle = () => { if (gravDirty) applyGravity(); };
+  const centsText = st => st.bend ? (st.bend > 0 ? ' +' : ' −') + Math.round(Math.abs(st.bend)) + '¢' : '';
+  const pitchOf = st => st.midi + st.bend / 100;
 
   // ---------- Edit slice: the depth step where new stars land ----------
   const slice = new THREE.Group();
@@ -567,6 +635,19 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   const selRing = new THREE.Sprite(new THREE.SpriteMaterial({ map: ringTex, color: 0xf2cf86, transparent: true, opacity: 0.9, depthWrite: false, fog: false }));
   selRing.visible = false;
   scene.add(selRing);
+  // edit mode: a faint dot where a pulled star was placed and a line to where gravity holds it
+  let tetherCap = 0, tetherPos = null, homePos = null;
+  const tethers = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xa9e4ff, transparent: true, opacity: 0.5, fog: false }));
+  const homes = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xa9e4ff, size: 0.16, transparent: true, opacity: 0.55, depthWrite: false, fog: false }));
+  tethers.frustumCulled = homes.frustumCulled = false;
+  scene.add(tethers, homes);
+  function growTethers() {                   // capacity in line vertices (two per pulled star)
+    tetherCap = Math.max(64, tetherCap * 2);
+    tetherPos = new Float32Array(tetherCap * 3); homePos = new Float32Array(tetherCap * 3 / 2);
+    tethers.geometry.setAttribute('position', new THREE.BufferAttribute(tetherPos, 3));
+    homes.geometry.setAttribute('position', new THREE.BufferAttribute(homePos, 3));
+  }
+  growTethers();
 
   // ripple rings
   const rings = [];
@@ -653,7 +734,8 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   function playStar(st, when) {
     if (!ctx) return;
     const t = Math.max(when || 0, ctx.currentTime);
-    const f = mtof(st.midi), s = st.size;
+    settle();
+    const f = mtof(pitchOf(st)), s = st.size;
     const decay = 0.45 + s * 3.4;
     const peak = (0.05 + 0.3 * s * s) * Math.min(1.6, Math.pow(261.6 / f, 0.25));
 
@@ -730,9 +812,13 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
 
   // ---------- Readout ----------
   const noteName = document.getElementById('noteName'), noteMeta = document.getElementById('noteMeta');
+  function starMeta(st) {
+    settle();
+    return (st.bend ? centsText(st).trim() + ' · ' : '') + mtof(pitchOf(st)).toFixed(1) + ' Hz · size ' + st.size.toFixed(2);
+  }
   function show(st) {
     noteName.textContent = midiName(st.midi);
-    noteMeta.textContent = mtof(st.midi).toFixed(1) + ' Hz · size ' + st.size.toFixed(2);
+    noteMeta.textContent = starMeta(st);
   }
 
   // ---------- Pointer ----------
@@ -802,7 +888,8 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     sizeIn.value = Math.round(s * 100); sizeOut.textContent = s.toFixed(2);
     stepIn.value = sliceStep + 1; stepOut.textContent = sliceStep + 1;
     insTitle.textContent = selected ? 'Selected star' : 'New star';
-    insNote.textContent = selected ? midiName(selected.midi) : '';
+    if (selected) settle();
+    insNote.textContent = selected ? midiName(selected.midi) + centsText(selected) : '';
     delBtn.disabled = !selected;
     slice.position.z = stepZ(sliceStep);
   }
@@ -993,7 +1080,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
         noteMeta.textContent = 'place ' + midiName(m) + ' · step ' + (sliceStep + 1) + ' · size ' + brush.toFixed(2);
       }
     } else if (st && !pressing) {
-      noteMeta.textContent = midiName(st.midi) + ' · ' + mtof(st.midi).toFixed(1) + ' Hz · size ' + st.size.toFixed(2);
+      noteMeta.textContent = midiName(st.midi) + ' · ' + starMeta(st);
     }
   });
 
@@ -1026,6 +1113,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   function fieldRecord(name) {
     return {
       name, savedAt: Date.now(), scale: state.scale, root: state.root, bpm: state.bpm, dir: state.dir, steps: STEPS,
+      gravity: r3(state.gravity), bend: state.bend,
       stars: stars.map(s => ({ step: s.step, x: r3(s.x), y: r3(s.yRaw), size: r3(s.size) })),
     };
   }
@@ -1134,6 +1222,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     state.bpm = +f.bpm || state.bpm; bpm.value = state.bpm; bpmOut.textContent = state.bpm;
     if (f.dir) setDir(f.dir);
     setSteps(STEP_CHOICES.includes(+f.steps) ? +f.steps : 16);   // fields saved before step counts existed are 16
+    setGravity(+f.gravity || 0); setBend(f.bend);                // fields saved before gravity open at 0, quarter tone
     setField((f.stars || []).map(s => ({ step: Math.max(0, Math.min(STEPS - 1, s.step | 0)), x: +s.x, y: +s.y, size: Math.max(0.12, Math.min(1, +s.size)) })));
     retune(); syncInspector();
     currentId = f.id; armedDelete = null;
@@ -1174,7 +1263,23 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   bpm.addEventListener('input', () => { state.bpm = +bpm.value; bpmOut.textContent = bpm.value; });
   scaleSel.addEventListener('change', () => { state.scale = scaleSel.value; retune(); syncInspector(); });
   rootSel.addEventListener('change', () => { state.root = +rootSel.value; retune(); syncInspector(); });
-  document.getElementById('newField').addEventListener('click', () => { pushUndo(); select(null); setField(generateField()); currentId = null; renderLibrary(); });
+  const grav = document.getElementById('grav'), gravOut = document.getElementById('gravOut');
+  function setGravity(g) {
+    state.gravity = Math.max(0, Math.min(1, g));
+    grav.value = Math.round(state.gravity * 100); gravOut.textContent = grav.value;
+    gravDirty = true;
+    if (selected) syncInspector();
+  }
+  grav.addEventListener('input', () => setGravity(grav.value / 100));
+  const bendSel = document.getElementById('bend');
+  function setBend(b) {
+    state.bend = BEND_LIMITS[b] ? b : 'quarter'; bendSel.value = state.bend;
+    gravDirty = true;
+    if (selected) syncInspector();
+  }
+  bendSel.addEventListener('change', () => setBend(bendSel.value));
+  // a new field starts without gravity
+  document.getElementById('newField').addEventListener('click', () => { pushUndo(); select(null); setField(generateField()); setGravity(0); currentId = null; renderLibrary(); });
   const vol = document.getElementById('vol');
   vol.addEventListener('input', () => { state.level = vol.value / 100; if (master) master.gain.setTargetAtTime(state.level, ctx.currentTime, 0.02); });
   document.getElementById('wakeBtn').addEventListener('click', () => {
@@ -1223,6 +1328,22 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
 
     // stars grow a little when the camera is far back (narrow phone screens), so they stay easy to see
     const viewBoost = Math.min(1.5, Math.max(1, camera.position.length() / 26));
+    settle();
+    const glide = reduceMotion ? 1 : 1 - Math.exp(-dt * 7);
+    while (tetherCap < stars.length * 2) growTethers();
+    let tn = 0;                              // pulled stars drawn with a tether this frame
+    for (const st of stars) {
+      if (drag && drag.st === st) st.sprite.position.copy(st.target);
+      else st.sprite.position.lerp(st.target, glide);
+      st.rays.position.copy(st.sprite.position);
+      if (mode === 'edit' && st.sprite.position.distanceToSquared(st.home) > 0.0025) {
+        st.home.toArray(tetherPos, tn * 6); st.sprite.position.toArray(tetherPos, tn * 6 + 3);
+        st.home.toArray(homePos, tn * 3);
+        tn++;
+      }
+    }
+    tethers.geometry.setDrawRange(0, tn * 2); tethers.geometry.attributes.position.needsUpdate = true;
+    homes.geometry.setDrawRange(0, tn); homes.geometry.attributes.position.needsUpdate = true;
     for (const st of stars) {
       st.flash *= Math.exp(-dt * (2.2 / (0.4 + st.size)));
       st.hover += ((st === hovered ? 1 : 0) - st.hover) * Math.min(1, dt * 10);
@@ -1272,7 +1393,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   connectStore();
   resize();
   requestAnimationFrame(frame);
-  window.__field = { get stars() { return stars; }, get ctx() { return ctx; }, get sweeping() { return sweeping; }, get dir() { return state.dir; }, sweep, sweepStep, get steps() { return STEPS; }, get selected() { return selected; }, camera, stepZ, degreeY };
+  window.__field = { get stars() { return stars; }, get ctx() { return ctx; }, get sweeping() { return sweeping; }, get dir() { return state.dir; }, sweep, sweepStep, get steps() { return STEPS; }, get gravity() { return state.gravity; }, setGravity, setBend, get selected() { return selected; }, camera, stepZ, degreeY };
 })();
 </script>
 
