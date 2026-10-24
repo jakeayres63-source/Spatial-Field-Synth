@@ -101,6 +101,13 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
 .inspector button:disabled { opacity: 0.4; cursor: default; }
 .inspector button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 #delBtn:not(:disabled) { color: #ffb4a2; }
+.ins-steps { display: grid; grid-template-columns: 40px 1fr; align-items: center; gap: 8px; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+.ins-steps .seg { display: flex; gap: 0; }
+.ins-steps .seg button { flex: 1; border-radius: 0; font-family: var(--mono); }
+.ins-steps .seg button:first-child { border-radius: 999px 0 0 999px; }
+.ins-steps .seg button:last-child { border-radius: 0 999px 999px 0; }
+.ins-steps .seg button + button { margin-left: -1px; }
+.ins-steps .seg button[aria-pressed="true"] { background: rgba(169, 228, 255, 0.16); color: #cfeeff; border-color: rgba(169, 228, 255, 0.5); }
 .ins-hint { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--dim); }
 .ins-hint kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink); }
 .library {
@@ -168,6 +175,9 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
         <button id="insSweepBtn" type="button" aria-pressed="false">Play sweep</button>
       </div>
       <label for="sizeIn">Size <input id="sizeIn" type="range" min="12" max="100" value="45"><output id="sizeOut">0.45</output></label>
+      <div class="ins-steps" role="group" aria-labelledby="stepsLbl"><span id="stepsLbl">Steps</span>
+        <span class="seg"><button type="button" data-steps="16" aria-pressed="true">16</button><button type="button" data-steps="32" aria-pressed="false">32</button><button type="button" data-steps="64" aria-pressed="false">64</button></span>
+      </div>
       <label for="stepIn">Step <input id="stepIn" type="range" min="1" max="16" value="1"><output id="stepOut">1</output></label>
       <div class="ins-actions">
         <button id="delBtn" type="button" disabled>Delete</button>
@@ -305,8 +315,13 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   const SCALES = Object.assign({}, ...SCALE_GROUPS.map(g => g[1]));
   const NOTE_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B'];
   const OCTAVES = 3, BASE_OCT = 3;       // three octaves starting at octave 3
-  const STEPS = 16;                       // sweep steps through depth (sixteenth notes)
-  const H = 6, W = 6, D = 8;              // field half-extents: height (pitch), width, depth (time)
+  const STEP_CHOICES = [16, 32, 64];
+  // Sweep steps through depth (sixteenth notes). The field grows deeper with more steps, though less than
+  // in proportion, so 64 steps stays on screen.
+  const DEPTH_FOR = { 16: 8, 32: 12, 64: 18 };
+  let STEPS = 16;
+  const H = 6, W = 6;                     // field half-extents: height (pitch), width
+  let D = DEPTH_FOR[STEPS];               // depth half-extent (time)
 
   const state = { scale: 'Major pentatonic', root: 2, bpm: 92, level: 0.7, dir: 'forward' };
 
@@ -348,6 +363,12 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   controls.dampingFactor = 0.08;
   controls.minDistance = 8;
   controls.maxDistance = 60;
+  // How far back the camera sits to frame the field, for this screen shape and depth.
+  function fitDistance() {
+    const hHalf = Math.atan(Math.tan(THREE.MathUtils.degToRad(25)) * camera.aspect);
+    const base = Math.max(22, Math.min(44, 10 / Math.sin(Math.min(hHalf, THREE.MathUtils.degToRad(25)))));
+    return base * (0.3 + 0.7 * D / 8);
+  }
   controls.enablePan = false;
 
   function makeTexture(draw, size) {
@@ -764,14 +785,16 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   };
 
   function pushUndo() {
-    undoStack.push(snapshot());
+    undoStack.push({ steps: STEPS, stars: snapshot() });
     if (undoStack.length > 60) undoStack.shift();
     undoBtn.disabled = false;
   }
   function undo() {
     if (!undoStack.length) return;
     select(null);
-    setField(undoStack.pop());
+    const u = undoStack.pop();
+    if (u.steps !== STEPS) setSteps(u.steps);
+    setField(u.stars);
     undoBtn.disabled = !undoStack.length;
   }
   function syncInspector() {
@@ -841,6 +864,31 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     if (selected && selected.step !== v) moveSelected(v - selected.step, 0);
     else { sliceStep = v; syncInspector(); }
   });
+  // Step count: more steps add empty time after the existing pattern; fewer steps drop the stars past the end
+  // (Undo brings them back).
+  const stepBtns = Array.from(document.querySelectorAll('[data-steps]'));
+  function setSteps(n) {
+    if (!STEP_CHOICES.includes(n)) n = 16;
+    const from = D;
+    STEPS = n; D = DEPTH_FOR[n];
+    stars.filter(s => s.step >= n).forEach(removeStar);
+    if (selected && !stars.includes(selected)) selected = null;
+    sliceStep = Math.min(sliceStep, n - 1);
+    step %= n;
+    stepIn.max = n;
+    stepBtns.forEach(b => b.setAttribute('aria-pressed', +b.dataset.steps === n));
+    stars.forEach(placeStar);
+    buildGuides(); orientSweep();
+    controls.maxDistance = 60 * Math.max(1, D / 10);
+    if (D !== from) camera.position.setLength(fitDistance());
+    syncInspector();
+  }
+  stepBtns.forEach(b => b.addEventListener('click', () => {
+    const n = +b.dataset.steps;
+    if (n === STEPS) return;
+    pushUndo();
+    setSteps(n);
+  }));
   delBtn.addEventListener('click', deleteSelected);
   undoBtn.addEventListener('click', undo);
   document.getElementById('clearBtn').addEventListener('click', () => { pushUndo(); select(null); setField([]); currentId = null; renderLibrary(); });
@@ -977,7 +1025,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   const r3 = v => Math.round(v * 1000) / 1000;
   function fieldRecord(name) {
     return {
-      name, savedAt: Date.now(), scale: state.scale, root: state.root, bpm: state.bpm, dir: state.dir,
+      name, savedAt: Date.now(), scale: state.scale, root: state.root, bpm: state.bpm, dir: state.dir, steps: STEPS,
       stars: stars.map(s => ({ step: s.step, x: r3(s.x), y: r3(s.yRaw), size: r3(s.size) })),
     };
   }
@@ -1085,6 +1133,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     state.root = +f.root || 0; rootSel.value = state.root;
     state.bpm = +f.bpm || state.bpm; bpm.value = state.bpm; bpmOut.textContent = state.bpm;
     if (f.dir) setDir(f.dir);
+    setSteps(STEP_CHOICES.includes(+f.steps) ? +f.steps : 16);   // fields saved before step counts existed are 16
     setField((f.stars || []).map(s => ({ step: Math.max(0, Math.min(STEPS - 1, s.step | 0)), x: +s.x, y: +s.y, size: Math.max(0.12, Math.min(1, +s.size)) })));
     retune(); syncInspector();
     currentId = f.id; armedDelete = null;
@@ -1141,8 +1190,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
     const w = stage.clientWidth, h = stage.clientHeight;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
-    const hHalf = Math.atan(Math.tan(THREE.MathUtils.degToRad(25)) * camera.aspect);
-    camera.position.setLength(Math.max(22, Math.min(44, 10 / Math.sin(Math.min(hHalf, THREE.MathUtils.degToRad(25))))));
+    camera.position.setLength(fitDistance());
     camera.updateProjectionMatrix();
   }
   window.addEventListener('resize', resize);
@@ -1224,7 +1272,7 @@ input[type=range] { width: 80px; accent-color: var(--gold); }
   connectStore();
   resize();
   requestAnimationFrame(frame);
-  window.__field = { get stars() { return stars; }, get ctx() { return ctx; }, get sweeping() { return sweeping; }, get dir() { return state.dir; }, sweep, sweepStep, get selected() { return selected; }, camera, stepZ, degreeY };
+  window.__field = { get stars() { return stars; }, get ctx() { return ctx; }, get sweeping() { return sweeping; }, get dir() { return state.dir; }, sweep, sweepStep, get steps() { return STEPS; }, get selected() { return selected; }, camera, stepZ, degreeY };
 })();
 </script>
 
